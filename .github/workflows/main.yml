@@ -57,7 +57,7 @@ jobs:
             full_repo=$(cat ./.github/build/target-docker-repo)            
           fi
           echo "Target docker repo: $full_repo"
-          echo ::set-env name=DOCKER_REPO::$full_repo
+          echo "DOCKER_REPO=$full_repo" >> $GITHUB_ENV
 
       - name: Get Next Version
         if: env.SHOULD_RUN == 'true'
