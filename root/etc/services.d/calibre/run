@@ -1,0 +1,36 @@
+#!/usr/bin/with-contenv bash
+
+#!/bin/execlineb -P
+
+##!/usr/bin/with-contenv bash
+
+
+# Load env variables
+#with-contenv
+
+# Redirect stderr to stdout.
+fdmove -c 2 1
+
+#set umask
+#importas UMASK_SET UMASK_SET
+#umask ${UMASK_SET}
+
+# Drop privileges and set env
+#s6-setuidgid abc
+#s6-env DISPLAY=:1 HOME=/config
+
+#default_opts="--auth-mode=basic --userdb /config/users.sqlite --enable-auth"
+#CALIBRE_OPTS=${CALIBRE_OPTS:-$default_opts}
+#CALIBRE_LIBRARY_LOCATION=${CALIBRE_LIBRARY_LOCATION:-/calibre}
+
+#echo "starting calibre: /usr/bin/calibre-server ${CALIBRE_LIBRARY_LOCATION} ${CALIBRE_OPTS}"
+
+# Execute Calibre Server
+#/usr/bin/calibre-server ${CALIBRE_LIBRARY_LOCATION} ${CALIBRE_OPTS}
+
+
+if [ -n "$UMASK_SET" ]; then
+	umask "$UMASK_SET"
+fi
+
+exec s6-setuidgid abc /usr/bin/calibre-server ${CALIBRE_LIBRARY_LOCATION} ${CALIBRE_OPTS}
