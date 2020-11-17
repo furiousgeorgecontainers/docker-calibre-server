@@ -1,0 +1,168 @@
+name: CI
+
+# Environment Variables
+env:
+  DOCKER_PREFIX: docker-
+  SCHEDULE_TAG: unstable
+
+  # Comma separated list of repos to exclude
+  EXCLUDE_REPOS: furiousgeorgecontainers/github-workflow-master
+  TAGS: latest
+  PUSH: true
+  SHOULD_RUN: true
+
+# Controls when the action will run. Triggers the workflow on push or pull request
+# events but only for the master branch
+on:
+  push:
+    branches: [ master ]
+    tags: # tags that start with vd.d.d
+      - v[0-9]+.[0-9]+.[0-9]+
+  pull_request:
+    branches: [ master ]
+  schedule:
+    - cron: '0 2 * * 1' # Weekly on Mondays at 02:00
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check exclude repos
+        id: excluded
+        run: |
+          excluded=$(echo "$EXCLUDE_REPOS" | tr , '\n')
+          if (echo "$excluded"  | fgrep -q "$GITHUB_REPOSITORY"); then
+            echo "This repository is excluded from running this workflow"
+            echo "SHOULD_RUN=false" >> $GITHUB_ENV
+          fi
+
+      - name: Checkout code
+        if: env.SHOULD_RUN == 'true'
+        uses: actions/checkout@v2
+
+      - name: Get target docker repository
+        if: env.SHOULD_RUN == 'true'
+        run: |
+
+          # derive docker registry repository from github repository.
+          # Standard to prefix github repo with docker-
+
+          ghrepo=$(echo $GITHUB_REPOSITORY | awk -F'/' '{print $NF}')
+
+          # remove the prefix from the github repo name
+          repo=${ghrepo#"$DOCKER_PREFIX"}
+          full_repo="${{ secrets.DOCKER_USERNAME }}/$repo"
+          if [ -f ./.github/build/target-docker-repo ]; then
+            echo "Repo override file exists"
+            full_repo=$(cat ./.github/build/target-docker-repo)            
+          fi
+          echo "Target docker repo: $full_repo"
+          echo ::set-env name=DOCKER_REPO::$full_repo
+
+      - name: Get Next Version
+        if: env.SHOULD_RUN == 'true'
+        id: vars
+        run: |
+          ref=$(echo $GITHUB_REF | awk -F'/' '{print $NF}')
+          reftype=$(echo $GITHUB_REF | awk -F'/' '{print $2}')
+          if [ "$reftype" == "tags" ]; then
+            tempversion=$(echo "$ref" | sed -e "s/^v//")
+            if [[ $tempversion =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+              version=$tempversion
+            elif [[ $tempversion =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
+              version="$tempversion.0"
+            fi
+          fi
+
+          if [ -z "$version" ]; then
+            # Get version from latest image on docker hub
+            version=$(./.github/build/get_docker_version.sh $DOCKER_REPO)
+            if [ "$version" == "null" ]; then
+              unset version
+            fi
+          fi
+           
+          # if the latest image does not have the version label
+          # get it from a version file in this repository
+          # if the version file does not exist, hardcoded version
+          if [ -n "$version" ]; then
+            echo "Using version from tag or latest: $version"
+          else
+            version=$(cat ./version 2>/dev/null || echo "1.0.0.0");
+            echo "Getting version from this job: $version"
+          fi
+
+          finalversion=$version
+
+          versionstart=$(echo $version | awk 'BEGIN{FS=OFS="."}{NF--; print}' )
+          build=$(echo $version | awk -F'.' '{print $NF}')
+
+          head_sha=$(git rev-parse HEAD)
+          tag_sha=$(git rev-list -n 1 $version 2>/dev/null || true)
+
+          if [ -n "$GITHUB_SHA" ] && [ "$head_sha" != "${tag_sha}" ]; then
+            newbuild=$(($build + 1))
+            finalversion="$versionstart.$newbuild"
+          fi
+
+          echo ::set-output name=version::$finalversion
+          echo ::set-output name=timestamp::$(date '+%Y-%m-%dT%H:%M:%S%:z')
+          
+      - name: Check if this run will push to the registry
+        if: env.SHOULD_RUN == 'true'
+        run: |
+
+          ref=$(echo $GITHUB_REF | awk -F'/' '{print $NF}')
+          reftype=$(echo $GITHUB_REF | awk -F'/' '{print $2}')
+          # only push to registry if branch is master or tags
+          if [ "$ref" != "master" ] &&  [ "$reftype" != "tags" ]; then
+            echo "PUSH=false" >> $GITHUB_ENV
+            echo "Will not push to registry because branch is not master: $ref"
+          else
+            echo "This run will attempt to push to the registry"
+          fi
+
+      - name: Select tags to push
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          if [ "$GITHUB_EVENT_NAME" == "schedule" ]; then
+            # only build and push the unstable tag if it is a schedule
+            echo "This is a scheduled run - only push $SCHEDULE_TAG tag"
+            echo "TAGS=$SCHEDULE_TAG" >> $GITHUB_ENV
+          else
+            # add all tags together into one comma-separated string
+
+
+
+            newtags=$(echo -n "$SCHEDULE_TAG,$TAGS ${{steps.vars.outputs.version}}" | awk -v RS='[, ]' '!a[$0]++' | paste -sd,)
+
+            # if building a github release tag, don't push latest
+            reftype=$(echo $GITHUB_REF | awk -F'/' '{print $2}')
+            if [ "$reftype" == "tags" ]; then
+              newtags="${{steps.vars.outputs.version}}"
+            fi
+
+            echo "Will build tags for: $newtags"
+            echo "TAGS=$newtags" >> $GITHUB_ENV
+          fi
+
+      - name: Display build information
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          echo "BUILD_DATE: ${{steps.vars.outputs.timestamp}}"
+          echo "VERSION: ${{steps.vars.outputs.version}}"
+          echo "PUSH: $PUSH"
+          echo "TAGS: $TAGS"
+          echo "DOCKER_REPO: $DOCKER_REPO"
+
+      - name: Build and push Docker images
+        if: env.SHOULD_RUN == 'true'
+        uses: docker/build-push-action@v1
+        with:
+          add_git_labels: true
+          build_args: BUILD_DATE=${{steps.vars.outputs.timestamp}},VERSION=${{steps.vars.outputs.version}}
+          push: ${{ env.PUSH }}
+          repository: ${{ env.DOCKER_REPO }}
+          tags: ${{ env.TAGS }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ secrets.DOCKER_USERNAME }}
